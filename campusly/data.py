@@ -75,12 +75,60 @@ class SchoolData:
     def slots_on(self, day: str) -> list[TimetableSlot]:
         return [s for s in self.timetable if s.day == day]
 
-    def teacher_at(self, day: str, period: int) -> set[str]:
-        """Teachers with a scheduled slot at this day/period."""
-        return {s.teacher for s in self.timetable if s.day == day and s.period == period}
+    def teacher_at(
+        self,
+        day: str,
+        period: int,
+        semesters: tuple[str, ...] | None = None,
+        overrides: dict[tuple[str, int, str], str] | None = None,
+    ) -> set[str]:
+        """Teachers with a scheduled slot at this day/period.
 
-    def room_at(self, day: str, period: int) -> set[str]:
-        return {s.room for s in self.timetable if s.day == day and s.period == period}
+        Pass `semesters` to scope to one semester parity — divisions in
+        the other parity are not in session at the same time. Pass
+        `overrides` (slot key -> teacher) to account for applied
+        exchanges.
+        """
+        ov = overrides or {}
+        return {
+            ov.get(s.key, s.teacher)
+            for s in self.timetable
+            if s.day == day
+            and s.period == period
+            and (
+                semesters is None
+                or not self.classes[s.class_group].semester
+                or self.classes[s.class_group].semester in semesters
+            )
+        }
+
+    def room_at(
+        self, day: str, period: int, semesters: tuple[str, ...] | None = None
+    ) -> set[str]:
+        return {
+            s.room
+            for s in self.timetable
+            if s.day == day
+            and s.period == period
+            and (
+                semesters is None
+                or not self.classes[s.class_group].semester
+                or self.classes[s.class_group].semester in semesters
+            )
+        }
+
+    def slot_at(
+        self, day: str, period: int, class_group: str
+    ) -> TimetableSlot | None:
+        """The division's slot at this day/period, if any."""
+        for s in self.timetable:
+            if (
+                s.day == day
+                and s.period == period
+                and s.class_group == class_group
+            ):
+                return s
+        return None
 
 
 def _departments() -> dict[str, Department]:
@@ -219,15 +267,31 @@ def _classes() -> dict[str, ClassGroup]:
 _CORE_SUBJECT = {"cse": "cs", "ece": "ec", "eee": "ee", "me": "mech", "ce": "civil"}
 
 
+# Marker for free (non-teaching) periods inside a weekly mix.
+FREE_PERIOD = "free"
+
+
 def _week_mix(dept: str) -> list[str]:
-    """30-slot weekly mix: department core plus shared service subjects."""
+    """30-slot weekly mix: department core, service subjects, free periods."""
     return (
-        [_CORE_SUBJECT[dept]] * 10 + ["math"] * 6 + ["phy"] * 4
-        + ["chem"] * 4 + ["eng"] * 3 + ["pe"] * 3
+        [_CORE_SUBJECT[dept]] * 8 + ["math"] * 5 + ["phy"] * 4
+        + ["chem"] * 4 + ["eng"] * 3 + ["pe"] * 2 + [FREE_PERIOD] * 4
     )
 
 
 _HOME_ROOMS = {cid: f"R-{101 + i}" for i, cid in enumerate(_classes())}
+
+
+def semester_parity(semester: str) -> tuple[str, ...]:
+    """The parity group a semester belongs to (its in-session cohort).
+
+    Unknown/empty semesters conservatively resolve to all semesters.
+    """
+    if semester in ODD_SEMESTERS:
+        return ODD_SEMESTERS
+    if semester in EVEN_SEMESTERS:
+        return EVEN_SEMESTERS
+    return tuple(SEMESTERS)
 
 
 def _match(candidates: dict[str, list[str]]) -> dict[str, str]:
@@ -301,6 +365,7 @@ def _build_timetable(
                         if rotated[cid][idx] in t.subjects
                     ]
                     for cid, c in parity_classes.items()
+                    if rotated[cid][idx] != FREE_PERIOD
                 }
                 for cid, tid in _match(candidates).items():
                     assigned_load[tid] += 1

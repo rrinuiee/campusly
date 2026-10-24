@@ -14,7 +14,7 @@ No randomness anywhere - identical inputs always yield identical proposals.
 
 from __future__ import annotations
 
-from .data import SchoolData
+from .data import SchoolData, semester_parity
 from .models import STATUS_PENDING, STATUS_UNCOVERED, Proposal, TimetableSlot
 
 
@@ -27,6 +27,7 @@ def allocate(
     taken: dict[tuple[str, int], set[str]],
     taken_rooms: dict[tuple[str, int], set[str]] | None = None,
     start_seq: int = 1,
+    exchange_overrides: dict[tuple[str, int, str], str] | None = None,
 ) -> list[Proposal]:
     """Produce one Proposal per slot.
 
@@ -34,7 +35,9 @@ def allocate(
     it is updated in place as assignments are made. `taken` maps
     (day, period) -> teacher ids already committed as substitutes (this run
     plus earlier pending/approved proposals). `taken_rooms` likewise tracks
-    rooms committed by earlier proposals.
+    rooms committed by earlier proposals. `exchange_overrides` maps a
+    timetable slot key -> the teacher who effectively holds it after an
+    approved exchange, so availability accounts for applied swaps.
     """
     if taken_rooms is None:
         taken_rooms = {}
@@ -43,15 +46,28 @@ def allocate(
 
     for slot in sorted(slots, key=lambda s: (s.period, s.class_group)):
         key = (slot.day, slot.period)
-        busy = data.teacher_at(slot.day, slot.period) | taken.get(key, set()) | absent_teachers
+        # Availability is scoped to the covered slot's semester parity —
+        # the other parity is never in session at the same time.
+        parity = semester_parity(data.classes[slot.class_group].semester)
+        busy = (
+            data.teacher_at(
+                slot.day, slot.period, parity, overrides=exchange_overrides
+            )
+            | taken.get(key, set())
+            | absent_teachers
+        )
+        slot_teacher = (exchange_overrides or {}).get(slot.key, slot.teacher)
         candidates = [
             t for t in data.teachers.values()
-            if t.id not in busy and t.id != slot.teacher
+            if t.id not in busy and t.id != slot_teacher
         ]
-        # Stable ranking: subject match desc, workload asc, id asc.
+        # Stable ranking: subject match, same department as the division,
+        # workload asc, id asc.
+        division_dept = data.classes[slot.class_group].department
         candidates.sort(
             key=lambda t: (
                 slot.subject not in t.subjects,
+                t.department != division_dept,
                 workload.get(t.id, 0),
                 t.id,
             )
@@ -61,8 +77,14 @@ def allocate(
         substitute = candidates[0].id if candidates else None
         if substitute and slot.subject not in data.teachers[substitute].subjects:
             warnings.append("non-subject-match")
+        if substitute and data.teachers[substitute].department != division_dept:
+            warnings.append("cross-department")
 
-        assigned_room = _pick_room(data, slot, taken_rooms.get(key, set())) if substitute else None
+        assigned_room = (
+            _pick_room(data, slot, parity, taken_rooms.get(key, set()))
+            if substitute
+            else None
+        )
         if substitute and assigned_room != slot.room:
             warnings.append("room-changed")
 
@@ -99,11 +121,13 @@ def allocate(
     return proposals
 
 
-def _pick_room(data: SchoolData, slot: TimetableSlot, taken: set[str]) -> str | None:
+def _pick_room(
+    data: SchoolData, slot: TimetableSlot, parity: tuple[str, ...], taken: set[str]
+) -> str | None:
     """Original room unless another proposal took it, else first free room."""
     if slot.room not in taken:
         return slot.room
-    occupied = data.room_at(slot.day, slot.period) | taken
+    occupied = data.room_at(slot.day, slot.period, parity) | taken
     for rid in sorted(data.rooms):
         if rid not in occupied:
             return rid

@@ -20,8 +20,13 @@ def store():
 
 
 def _absent_teacher(store):
-    """A teacher who definitely teaches on Monday."""
-    slot = store.data.slots_on("Monday")[0]
+    """A teacher with in-session classes on Monday (active semester)."""
+    active = set(store.active_semesters(MONDAY))
+    slot = next(
+        s
+        for s in store.data.slots_on("Monday")
+        if store.data.classes[s.class_group].semester in active
+    )
     return slot.teacher
 
 

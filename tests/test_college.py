@@ -13,18 +13,41 @@ from campusly.data import (
     default_semester_windows,
     load_seed_data,
 )
+from campusly.data import SchoolData, semester_parity
+from campusly.models import SUPERVISION_SUBJECT, STATUS_UNCOVERED
 from campusly.store import Store
+
+MONDAY = "2026-10-26"
+
+
+def _free_slot(store, class_group, day=None):
+    """First (day, period) where the division has no class."""
+    for d in ([day] if day else ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]):
+        for period in range(1, 7):
+            if store.data.slot_at(d, period, class_group) is None:
+                return d, period
+    raise AssertionError("division has no free period")
+
+
+def _free_teacher(store, day, period, parity, exclude=()):
+    busy = store.data.teacher_at(day, period, parity) | set(exclude)
+    return next(t.id for t in store.data.teachers.values() if t.id not in busy)
 from campusly.models import (
     EXCHANGE_ACCEPTED,
     EXCHANGE_APPROVED,
+    EXCHANGE_CANCELLED,
+    EXCHANGE_DECLINED,
     EXCHANGE_PROPOSED,
+    EXCHANGE_REJECTED,
     SUPERVISION_SUBJECT,
     ClassGroup,
     Department,
     Exchange,
     ProjectGroup,
+    Room,
     Subject,
     Teacher,
+    TimetableSlot,
 )
 
 
@@ -166,6 +189,201 @@ def test_seed_first_year_cross_department_teaching():
     assert bs_share >= 0.25  # Basic Science visibly teaches first year
 
 
+def test_seed_divisions_have_free_periods():
+    d = load_seed_data()
+    day, period = _free_slot(Store(d), "CSE-S2-A")
+    assert d.slot_at(day, period, "CSE-S2-A") is None
+
+
+# -------------------------------------------------------- subject offerings
+
+
+def test_add_offering_creates_division_slot():
+    store = Store(load_seed_data())
+    day, period = _free_slot(store, "CSE-S2-A")
+    tid = _free_teacher(store, day, period, semester_parity("S2"))
+    slot = store.add_offering("CSE-S2-A", "cs", tid, day, period)
+    assert store.data.slot_at(day, period, "CSE-S2-A") is slot
+    assert slot.subject == "cs" and slot.teacher == tid
+
+
+def test_add_offering_rejects_conflicts():
+    store = Store(load_seed_data())
+    occupied = next(
+        s for s in store.data.slots_on("Monday")
+        if store.data.classes[s.class_group].semester in EVEN_SEMESTERS
+    )
+    with pytest.raises(ValueError, match="division already"):
+        store.add_offering(occupied.class_group, "math", "B02", occupied.day, occupied.period)
+    day, period = _free_slot(store, "CSE-S2-A")
+    busy = next(iter(store.data.teacher_at(day, period, semester_parity("S2"))))
+    with pytest.raises(ValueError, match="faculty already"):
+        store.add_offering("CSE-S2-A", "cs", busy, day, period)
+
+
+def test_reassign_offering_updates_and_validates():
+    store = Store(load_seed_data())
+    day, period = _free_slot(store, "CSE-S2-A")
+    parity = semester_parity("S2")
+    t1 = _free_teacher(store, day, period, parity)
+    store.add_offering("CSE-S2-A", "cs", t1, day, period)
+    t2 = _free_teacher(store, day, period, parity)
+    store.reassign_offering(day, period, "CSE-S2-A", t2)
+    assert store.data.slot_at(day, period, "CSE-S2-A").teacher == t2
+    busy = next(iter(store.data.teacher_at(day, period, parity) - {t2}))
+    with pytest.raises(ValueError):
+        store.reassign_offering(day, period, "CSE-S2-A", busy)
+
+
+def test_cross_department_flag():
+    store = Store(load_seed_data())
+    cross = next(s for s in store.data.timetable if store.cross_department(s))
+    assert (
+        store.data.teachers[cross.teacher].department
+        != store.data.classes[cross.class_group].department
+    )
+    home = next(
+        s for s in store.data.timetable
+        if store.data.classes[s.class_group].department == "cse"
+        and store.data.teachers[s.teacher].department == "cse"
+    )
+    assert not store.cross_department(home)
+
+
+# ------------------------------------------------------- project supervision
+
+
+def test_add_project_group_creates_supervision_slot():
+    store = Store(load_seed_data())
+    day, period = _free_slot(store, "ECE-S4-B")
+    parity = semester_parity("S4")
+    sup = _free_teacher(store, day, period, parity)
+    room = next(
+        r for r in store.data.rooms
+        if r not in store.data.room_at(day, period, parity)
+    )
+    pg = store.add_project_group("Smart Grid", "ECE-S4-B", sup, day, period, room)
+    assert pg.supervisor == sup
+    slot = store.data.slot_at(day, period, "ECE-S4-B")
+    assert slot.subject == SUPERVISION_SUBJECT and slot.teacher == sup
+
+
+def test_add_project_group_rejects_conflicts():
+    store = Store(load_seed_data())
+    day, period = _free_slot(store, "ECE-S4-B")
+    parity = semester_parity("S4")
+    busy_sup = next(iter(store.data.teacher_at(day, period, parity)))
+    free_room = next(
+        r for r in store.data.rooms
+        if r not in store.data.room_at(day, period, parity)
+    )
+    with pytest.raises(ValueError, match="supervisor"):
+        store.add_project_group("X", "ECE-S4-B", busy_sup, day, period, free_room)
+    busy_room = next(iter(store.data.room_at(day, period, parity)))
+    free_sup = _free_teacher(store, day, period, parity)
+    with pytest.raises(ValueError, match="room"):
+        store.add_project_group("X", "ECE-S4-B", free_sup, day, period, busy_room)
+    busy_div = store.data.slot_at("Monday", 1, "ECE-S4-B")
+    if busy_div:
+        with pytest.raises(ValueError, match="division"):
+            store.add_project_group("X", "ECE-S4-B", "B02", "Monday", 1, free_room)
+
+
+def test_reassign_supervisor_moves_slot():
+    store = Store(load_seed_data())
+    day, period = _free_slot(store, "ME-S6-A")
+    parity = semester_parity("S6")
+    sup = _free_teacher(store, day, period, parity)
+    room = next(
+        r for r in store.data.rooms
+        if r not in store.data.room_at(day, period, parity)
+    )
+    pg = store.add_project_group("Y", "ME-S6-A", sup, day, period, room)
+    new_sup = _free_teacher(store, day, period, parity, exclude={sup})
+    store.reassign_supervisor(pg.id, new_sup)
+    assert pg.supervisor == new_sup
+    assert store.data.slot_at(day, period, "ME-S6-A").teacher == new_sup
+
+
+def test_supervisor_absence_flagged_for_manual_handling():
+    store = Store(load_seed_data())
+    day, period = _free_slot(store, "ECE-S4-B", day="Monday")
+    parity = semester_parity("S4")
+    sup = _free_teacher(store, day, period, parity)
+    room = next(
+        r for r in store.data.rooms
+        if r not in store.data.room_at(day, period, parity)
+    )
+    pg = store.add_project_group("Z", "ECE-S4-B", sup, day, period, room)
+    store.report_absence(pg.supervisor, MONDAY)
+    props = store.run_allocation(MONDAY)
+    flagged = [p for p in props if p.subject == SUPERVISION_SUBJECT]
+    assert flagged
+    assert all(
+        p.status == STATUS_UNCOVERED and "supervision-manual-handling" in p.warnings
+        for p in flagged
+    )
+
+
+# ------------------------------------------------ scoping, parity, shared store
+
+
+def test_department_scoped_queries():
+    store = Store(load_seed_data())
+    assert store.department_of("CSE-S2-A") == "cse"
+    active = set(store.active_semesters(MONDAY))
+    slot = next(
+        s for s in store.data.slots_on("Monday")
+        if store.data.classes[s.class_group].semester in active
+        and store.data.classes[s.class_group].department == "cse"
+    )
+    store.report_absence(slot.teacher, MONDAY)
+    store.run_allocation(MONDAY)
+    cse_pending = store.pending(department="cse")
+    assert cse_pending
+    assert all(
+        store.data.classes[p.class_group].department == "cse" for p in cse_pending
+    )
+    assert all(
+        store.data.classes[p.class_group].department == "ece"
+        for p in store.proposals_for(MONDAY, department="ece")
+    )
+
+
+def test_absence_reporter_department_scoping():
+    store = Store(load_seed_data())
+    cse_tid = next(t.id for t in store.data.teachers.values() if t.department == "cse")
+    with pytest.raises(PermissionError):
+        store.report_absence(cse_tid, MONDAY, reporter_department="ece")
+    store.report_absence(cse_tid, MONDAY, reporter_department="cse")
+    store2 = Store(load_seed_data())
+    store2.report_absence(cse_tid, MONDAY)  # admin (None) is unrestricted
+
+
+def test_uncovered_and_timetable_scoped_to_active_semesters():
+    store = Store(load_seed_data())
+    active = set(store.active_semesters(MONDAY))
+    slot = next(
+        s for s in store.data.slots_on("Monday")
+        if store.data.classes[s.class_group].semester in active
+    )
+    absence = store.report_absence(slot.teacher, MONDAY)
+    assert store.uncovered_slots(absence)
+    assert all(
+        store.data.classes[s.class_group].semester in active
+        for s in store.uncovered_slots(absence)
+    )
+    rows = store.effective_timetable(MONDAY)
+    assert rows
+    assert all(store.data.classes[r["class_group"]].semester in active for r in rows)
+
+
+def test_shared_store_instance():
+    import app
+
+    assert app.get_store() is app.get_store()
+
+
 # ------------------------------------------------------- store calendar overrides
 
 
@@ -189,3 +407,187 @@ def test_store_overrides_reset_on_fresh_store():
     store.override_semester_window("S4", dt.date(2026, 3, 1), dt.date(2026, 12, 31))
     fresh = Store(load_seed_data(), academic_year=2026)
     assert "S4" not in fresh.active_semesters("2026-03-15")
+
+
+# ------------------------------------------------------------- period exchange
+
+
+def _exchange_data():
+    """Minimal college for exchange tests: all divisions in semester S2
+    (even parity, in session on MONDAY)."""
+    subjects = {
+        "cs": Subject("cs", "Computer Science", "cse"),
+        "ma": Subject("ma", "Mathematics", "bs"),
+    }
+    teachers = {
+        "A1": Teacher("A1", "A1", frozenset({"cs"}), "cse"),
+        "B1": Teacher("B1", "B1", frozenset({"ma"}), "cse"),
+        "A2": Teacher("A2", "A2", frozenset({"cs"}), "ece"),
+        "B2": Teacher("B2", "B2", frozenset({"ma"}), "ece"),
+        "X1": Teacher("X1", "X1", frozenset({"cs"}), "cse"),
+    }
+    rooms = {r: Room(r, r) for r in ("R1", "R2", "R3")}
+    classes = {
+        cid: ClassGroup(cid, cid, dept, "S2", sec)
+        for cid, dept, sec in (
+            ("CSE-S2-A", "cse", "A"),
+            ("CSE-S2-B", "cse", "B"),
+            ("ECE-S2-A", "ece", "A"),
+        )
+    }
+    timetable = [
+        TimetableSlot("Monday", 1, "CSE-S2-A", "cs", "A1", "R1"),
+        TimetableSlot("Tuesday", 2, "CSE-S2-A", "ma", "B1", "R1"),
+        TimetableSlot("Monday", 3, "ECE-S2-A", "cs", "A2", "R2"),
+        TimetableSlot("Monday", 1, "ECE-S2-A", "ma", "B2", "R2"),
+        TimetableSlot("Tuesday", 4, "ECE-S2-A", "ma", "B2", "R2"),
+        TimetableSlot("Monday", 1, "CSE-S2-B", "cs", "X1", "R3"),
+    ]
+    departments = {
+        "bs": Department("bs", "Basic Science"),
+        "cse": Department("cse", "CSE"),
+        "ece": Department("ece", "ECE"),
+    }
+    return SchoolData(
+        subjects=subjects,
+        teachers=teachers,
+        rooms=rooms,
+        classes=classes,
+        timetable=timetable,
+        departments=departments,
+    )
+
+
+SLOT_A = ("Monday", 1, "CSE-S2-A")   # taught by A1 (cse)
+SLOT_B = ("Monday", 3, "ECE-S2-A")   # taught by A2 (ece)
+
+
+def _timetable_row(store, day, period, class_group, date=MONDAY):
+    return next(
+        r
+        for r in store.effective_timetable(date)
+        if r["day"] == day and r["period"] == period
+        and r["class_group"] == class_group
+    )
+
+
+def test_exchange_full_lifecycle():
+    store = Store(_exchange_data())
+    x = store.propose_exchange("A1", SLOT_A, SLOT_B)
+    assert x.status == EXCHANGE_PROPOSED
+    assert x.counterparty == "A2"
+    # Nothing changes before approval
+    assert _timetable_row(store, *SLOT_A)["teacher"] == "A1"
+    assert _timetable_row(store, *SLOT_B)["teacher"] == "A2"
+
+    store.respond_exchange(x.id, accept=True, actor="A2")
+    assert x.status == EXCHANGE_ACCEPTED
+    assert store.pending_exchanges(department="cse") == [x]
+    assert store.pending_exchanges(department="ece") == []
+    # Accepted but unapproved is still invisible in timetables
+    assert _timetable_row(store, *SLOT_A)["teacher"] == "A1"
+
+    store.approve_exchange(x.id, department="cse")
+    assert x.status == EXCHANGE_APPROVED
+    row_a = _timetable_row(store, *SLOT_A)
+    row_b = _timetable_row(store, *SLOT_B)
+    assert row_a["teacher"] == "A2" and row_a["exchanged"]
+    assert row_a["original_teacher"] == "A1"
+    assert row_b["teacher"] == "A1" and row_b["exchanged"]
+    # Faculty weekly timetables reflect the swap
+    assert [s.key for s in store.teacher_slots("A2")] == [SLOT_A]
+    assert SLOT_B in [s.key for s in store.teacher_slots("A1")]
+
+
+def test_exchange_propose_rejects_double_booking():
+    store = Store(_exchange_data())
+    # B2 already teaches Monday P1 — cannot take over A1's Monday-P1 slot.
+    with pytest.raises(ValueError, match="double-book"):
+        store.propose_exchange("A1", SLOT_A, ("Tuesday", 4, "ECE-S2-A"))
+    assert store.exchanges == []
+    # Not your own slot / not yourself
+    with pytest.raises(ValueError, match="not taught by the proposer"):
+        store.propose_exchange("B1", SLOT_A, SLOT_B)
+    with pytest.raises(ValueError, match="yourself"):
+        store.propose_exchange(
+            "B1", ("Tuesday", 2, "CSE-S2-A"), ("Tuesday", 2, "CSE-S2-A")
+        )
+    with pytest.raises(KeyError):
+        store.propose_exchange("A1", ("Friday", 6, "CSE-S2-A"), SLOT_B)
+
+
+def test_exchange_decline_and_cancel():
+    store = Store(_exchange_data())
+    x = store.propose_exchange("A1", SLOT_A, SLOT_B)
+    with pytest.raises(PermissionError):
+        store.respond_exchange(x.id, accept=True, actor="A1")  # not counterparty
+    store.respond_exchange(x.id, accept=False, actor="A2")
+    assert x.status == EXCHANGE_DECLINED
+    assert _timetable_row(store, *SLOT_A)["teacher"] == "A1"
+
+    y = store.propose_exchange("A1", SLOT_A, SLOT_B)
+    with pytest.raises(PermissionError):
+        store.cancel_exchange(y.id, actor="A2")  # not proposer
+    store.cancel_exchange(y.id, actor="A1")
+    assert y.status == EXCHANGE_CANCELLED
+
+    z = store.propose_exchange("A1", SLOT_A, SLOT_B)
+    store.respond_exchange(z.id, accept=True)
+    with pytest.raises(ValueError):
+        store.cancel_exchange(z.id, actor="A1")  # too late to cancel
+
+
+def test_exchange_coordinator_scoping_and_reject():
+    store = Store(_exchange_data())
+    x = store.propose_exchange("A1", SLOT_A, SLOT_B)
+    store.respond_exchange(x.id, accept=True)
+    with pytest.raises(PermissionError):
+        store.approve_exchange(x.id, department="ece")
+    store.reject_exchange(x.id, department="cse")
+    assert x.status == EXCHANGE_REJECTED
+    assert _timetable_row(store, *SLOT_A)["teacher"] == "A1"
+    assert _timetable_row(store, *SLOT_B)["teacher"] == "A2"
+    with pytest.raises(ValueError):
+        store.approve_exchange(x.id)  # rejected is terminal
+
+
+def test_exchange_late_conflict_refused():
+    store = Store(_exchange_data())
+    x = store.propose_exchange("A1", SLOT_A, SLOT_B)
+    store.respond_exchange(x.id, accept=True)
+    # Meanwhile A2 is committed as substitute at Monday P1 (X1 absent).
+    store.report_absence("X1", MONDAY)
+    props = store.run_allocation(MONDAY)
+    (p,) = [p for p in props if p.class_group == "CSE-S2-B"]
+    assert p.substitute_teacher == "A2"  # only free cs-qualified faculty
+    assert "cross-department" in p.warnings
+    store.approve(p.id)
+    with pytest.raises(ValueError, match="substitute"):
+        store.approve_exchange(x.id, department="cse")
+    assert x.status == EXCHANGE_ACCEPTED
+    assert x.warnings
+    assert _timetable_row(store, *SLOT_A)["teacher"] == "A1"  # swap not applied
+
+
+def test_exchange_overrides_affect_uncovered_and_busy():
+    store = Store(_exchange_data())
+    x = store.propose_exchange("A1", SLOT_A, SLOT_B)
+    store.respond_exchange(x.id, accept=True)
+    store.approve_exchange(x.id)
+    # After the swap an absent A2 uncovers A1's old slot, not their old one.
+    absence = store.report_absence("A2", MONDAY)
+    assert [s.key for s in store.uncovered_slots(absence)] == [SLOT_A]
+    # And A1 (now at Monday P3) is free to substitute at Monday P1.
+    props = store.run_allocation(MONDAY)
+    (p,) = [p for p in props if p.class_group == "CSE-S2-A"]
+    assert p.substitute_teacher == "A1"
+
+
+def test_reject_proposal_scoped_to_department():
+    store = Store(_exchange_data())
+    store.report_absence("X1", MONDAY)
+    store.run_allocation(MONDAY)
+    p = next(p for p in store.pending(department="cse"))
+    with pytest.raises(PermissionError):
+        store.approve(p.id, department="ece")
+    store.approve(p.id, department="cse")

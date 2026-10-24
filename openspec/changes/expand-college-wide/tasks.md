@@ -12,32 +12,32 @@
 
 ## 3. Subject assignments + project supervision
 
-- [ ] 3.1 Implement subject offerings (division, subject, assigned faculty) that generate division timetable slots, including a cross-department flag when faculty home department ≠ division department; reject assignments that double-book faculty — verify pytest covers offering→slots, reassignment, conflict rejection, cross-department flag
-- [ ] 3.2 Implement project groups and weekly supervision slots on supervisor + division timetables, with conflict rejection and supervisor reassignment — verify pytest covers create, reassign, and supervisor-absence flagging (uncovered, manual handling)
+- [x] 3.1 Implement subject offerings (division, subject, assigned faculty) that generate division timetable slots, including a cross-department flag when faculty home department ≠ division department; reject assignments that double-book faculty — verify pytest covers offering→slots, reassignment, conflict rejection, cross-department flag
+- [x] 3.2 Implement project groups and weekly supervision slots on supervisor + division timetables, with conflict rejection and supervisor reassignment — verify pytest covers create, reassign, and supervisor-absence flagging (uncovered, manual handling)
 
 ## 4. Store: shared state, scoping, exchanges
 
-- [ ] 4.1 Switch the app to one shared `Store` instance (process-level, e.g. `st.cache_resource`) — verify a unit test or two-session manual check shows actions visible across sessions
-- [ ] 4.2 Implement the exchange lifecycle in `Store` (propose with swap-feasibility check → accept/decline/cancel → coordinator approve with conflict re-check → atomic effective-timetable overrides on both slots) — verify pytest covers approve, decline, cancel, reject, and late-conflict refusal
-- [ ] 4.3 Add department-scoped queries (pending queue filtered to coordinator's department; division→department lookup) and restrict absence reporting to Admin or the absent faculty's department coordinator — verify pytest covers scoping and refused cross-department actions
+- [x] 4.1 Switch the app to one shared `Store` instance (process-level, e.g. `st.cache_resource`) — verify a unit test or two-session manual check shows actions visible across sessions
+- [x] 4.2 Implement the exchange lifecycle in `Store` (propose with swap-feasibility check → accept/decline/cancel → coordinator approve with conflict re-check → atomic effective-timetable overrides on both slots) — verify pytest covers approve, decline, cancel, reject, and late-conflict refusal
+- [x] 4.3 Add department-scoped queries (pending queue filtered to coordinator's department; division→department lookup) and restrict absence reporting to Admin or the absent faculty's department coordinator — verify pytest covers scoping and refused cross-department actions
 
 ## 5. Allocation engine updates
 
-- [ ] 5.1 Extend `allocate`: evaluate busy faculty college-wide, rank candidates subject-match → same-department → workload → id, and emit a `cross-department` warning — verify pytest covers cross-department busy exclusion and in-department preference while existing allocation tests stay green
-- [ ] 5.2 Exclude supervision slots from automatic substitute assignment (always flag uncovered for manual handling) — verify pytest covers a supervisor absence producing a flagged supervision slot
+- [x] 5.1 Extend `allocate`: evaluate busy faculty college-wide, rank candidates subject-match → same-department → workload → id, and emit a `cross-department` warning — verify pytest covers cross-department busy exclusion and in-department preference while existing allocation tests stay green
+- [x] 5.2 Exclude supervision slots from automatic substitute assignment (always flag uncovered for manual handling) — verify pytest covers a supervisor absence producing a flagged supervision slot
 
 ## 6. Streamlit UI
 
-- [ ] 6.1 Add the demo role selector (Admin / Department Coordinator + department / Faculty / Student) and role-scoped page map — verify each role sees only its pages and switching needs no credentials
-- [ ] 6.2 Add Admin pages: semester calendar overrides and subject-offering management — verify an override changes the offered semesters and an assignment updates the division timetable in the UI
-- [ ] 6.3 Add exchange UI: faculty propose/respond to exchanges, coordinator approves — verify the full propose→accept→approve→both-timetables-update flow renders correctly
-- [ ] 6.4 Extend timetable views: department/semester/division selectors, faculty timetable, student division view, project groups and supervision slots — verify approved substitutions, applied exchanges, and uncovered/cross-department flags all render
-- [ ] 6.5 Update `README.md` for the college features (roles, departments, exchanges, calendar) — verify the documented commands still run as written
+- [x] 6.1 Add the demo role selector (Admin / Department Coordinator + department / Faculty / Student) and role-scoped page map — verify each role sees only its pages and switching needs no credentials
+- [x] 6.2 Add Admin pages: semester calendar overrides and subject-offering management — verify an override changes the offered semesters and an assignment updates the division timetable in the UI
+- [x] 6.3 Add exchange UI: faculty propose/respond to exchanges, coordinator approves — verify the full propose→accept→approve→both-timetables-update flow renders correctly
+- [x] 6.4 Extend timetable views: department/semester/division selectors, faculty timetable, student division view, project groups and supervision slots — verify approved substitutions, applied exchanges, and uncovered/cross-department flags all render
+- [x] 6.5 Update `README.md` for the college features (roles, departments, exchanges, calendar) — verify the documented commands still run as written
 
 ## 7. Verification
 
-- [ ] 7.1 Run `pytest` — all existing and new tests pass
-- [ ] 7.2 Run the full demo end-to-end once: seed → absence → allocate → coordinator approve → faculty exchange lifecycle → per-role timetable views
+- [x] 7.1 Run `pytest` — all existing and new tests pass
+- [x] 7.2 Run the full demo end-to-end once: seed → absence → allocate → coordinator approve → faculty exchange lifecycle → per-role timetable views
 
 ## Workflow follow-up
 

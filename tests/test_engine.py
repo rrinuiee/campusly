@@ -140,6 +140,63 @@ def test_non_subject_fallback_flagged():
     assert "non-subject-match" in p.warnings
 
 
+def _college_data(teacher_rows, class_rows, slots):
+    """Fixture with department-scoped teachers and divisions (semester S2)."""
+    return SchoolData(
+        subjects={
+            "cs": Subject("cs", "CS", "cse"),
+            "ec": Subject("ec", "EC", "ece"),
+        },
+        teachers={
+            tid: Teacher(tid, tid, frozenset(subs), dept)
+            for tid, subs, dept in teacher_rows
+        },
+        rooms={r: Room(r, r) for r in ("R1", "R2")},
+        classes={
+            cid: ClassGroup(cid, cid, dept, "S2", "A")
+            for cid, dept in class_rows
+        },
+        timetable=slots,
+    )
+
+
+def test_same_department_substitute_preferred():
+    # Both qualified and free: same-department wins over lower id.
+    data = _college_data(
+        [("A", {"cs"}, "cse"), ("Z", {"cs"}, "cse"), ("A0", {"cs"}, "ece")],
+        [("G1", "cse")],
+        [TimetableSlot("Monday", 1, "G1", "cs", "A", "R1")],
+    )
+    (p,) = run(data, data.timetable, absent={"A"})
+    assert p.substitute_teacher == "Z"
+    assert "cross-department" not in p.warnings
+
+
+def test_cross_department_substitute_flagged():
+    data = _college_data(
+        [("A", {"cs"}, "cse"), ("A0", {"cs"}, "ece")],
+        [("G1", "cse")],
+        [TimetableSlot("Monday", 1, "G1", "cs", "A", "R1")],
+    )
+    (p,) = run(data, data.timetable, absent={"A"})
+    assert p.substitute_teacher == "A0"
+    assert "cross-department" in p.warnings
+
+
+def test_busy_in_other_department_excluded():
+    # F teaches an ECE division at Monday P1 — cannot cover the CSE slot.
+    data = _college_data(
+        [("A", {"cs"}, "cse"), ("B", {"cs"}, "cse"), ("F", {"cs"}, "ece")],
+        [("G1", "cse"), ("G2", "ece")],
+        [
+            TimetableSlot("Monday", 1, "G1", "cs", "A", "R1"),
+            TimetableSlot("Monday", 1, "G2", "ec", "F", "R2"),
+        ],
+    )
+    (p,) = run(data, [data.timetable[0]], absent={"A"})
+    assert p.substitute_teacher == "B"
+
+
 def test_deterministic_repeat_runs():
     data = make_data(
         [("A", {"math"}), ("B", {"math"}), ("C", {"eng"}), ("E", {"math"})],
