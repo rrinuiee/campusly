@@ -7,9 +7,17 @@ until a coordinator approves a proposal.
 
 from __future__ import annotations
 
+import datetime as dt
 import itertools
 
-from .data import SchoolData, day_name
+from .data import (
+    SEMESTERS,
+    SchoolData,
+    SemesterWindow,
+    day_name,
+    default_semester_windows,
+)
+from .data import active_semesters as _active_semesters
 from .engine import allocate
 from .models import (
     STATUS_APPROVED,
@@ -26,11 +34,30 @@ class DuplicateAbsenceError(ValueError):
 
 
 class Store:
-    def __init__(self, data: SchoolData):
+    def __init__(self, data: SchoolData, academic_year: int | None = None):
         self.data = data
         self.absences: list[Absence] = []
         self.proposals: list[Proposal] = []
         self._seq = itertools.count(1)
+        # In-memory only: a fresh Store always starts from default windows.
+        self.semester_windows = default_semester_windows(
+            academic_year if academic_year is not None else dt.date.today().year
+        )
+
+    # ----- academic calendar ---------------------------------------------------
+
+    def override_semester_window(
+        self, semester: str, start: dt.date, end: dt.date
+    ) -> None:
+        """Admin override of a semester's date range (not persisted)."""
+        if semester not in SEMESTERS:
+            raise KeyError(f"unknown semester {semester}")
+        if end < start:
+            raise ValueError("semester window ends before it starts")
+        self.semester_windows[semester] = SemesterWindow(semester, start, end)
+
+    def active_semesters(self, date: str) -> list[str]:
+        return _active_semesters(date, self.semester_windows)
 
     # ----- absence reporting -------------------------------------------------
 
@@ -192,8 +219,6 @@ class Store:
         }
 
     def _weekly_workload(self, date: str) -> dict[str, int]:
-        import datetime as dt
-
         target = dt.date.fromisoformat(date).isocalendar()[:2]
         load: dict[str, int] = {}
         for p in self.proposals:

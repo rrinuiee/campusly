@@ -5,7 +5,7 @@ import io
 
 import pytest
 
-from campusly.data import load_seed_data
+from campusly.data import EVEN_SEMESTERS, ODD_SEMESTERS, load_seed_data
 from campusly.export import to_csv
 from campusly.models import STATUS_APPROVED, STATUS_PENDING, STATUS_UNCOVERED
 from campusly.store import DuplicateAbsenceError, Store
@@ -36,11 +36,15 @@ def test_seed_data_integrity(store):
         assert s.room in d.rooms
         assert s.class_group in d.classes
         assert s.subject in d.subjects
-    # no teacher or room double-booked in the base timetable
-    seen = set()
-    for s in d.timetable:
-        assert (s.day, s.period, s.teacher) not in seen
-        seen.add((s.day, s.period, s.teacher))
+    # no teacher or room double-booked within a semester parity
+    # (odd and even semesters are never in session together)
+    for parity in (ODD_SEMESTERS, EVEN_SEMESTERS):
+        seen = set()
+        for s in d.timetable:
+            if d.classes[s.class_group].semester not in parity:
+                continue
+            assert (s.day, s.period, s.teacher) not in seen
+            seen.add((s.day, s.period, s.teacher))
 
 
 def test_report_absence_lists_uncovered_periods(store):

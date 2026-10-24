@@ -26,9 +26,28 @@ STATUS_PENDING = "pending"
 STATUS_APPROVED = "approved"
 STATUS_UNCOVERED = "uncovered"
 
+# Exchange lifecycle: proposed -> accepted -> approved, with declined,
+# cancelled, and rejected as terminal states.
+EXCHANGE_PROPOSED = "proposed"
+EXCHANGE_ACCEPTED = "accepted"
+EXCHANGE_APPROVED = "approved"
+EXCHANGE_DECLINED = "declined"
+EXCHANGE_CANCELLED = "cancelled"
+EXCHANGE_REJECTED = "rejected"
+
+# Subject marker for project-supervision timetable slots.
+SUPERVISION_SUBJECT = "supervision"
+
 
 @dataclass(frozen=True)
 class Subject:
+    id: str
+    name: str
+    department: str = ""
+
+
+@dataclass(frozen=True)
+class Department:
     id: str
     name: str
 
@@ -38,6 +57,7 @@ class Teacher:
     id: str
     name: str
     subjects: frozenset[str]
+    department: str = ""
 
 
 @dataclass(frozen=True)
@@ -48,8 +68,25 @@ class Room:
 
 @dataclass(frozen=True)
 class ClassGroup:
+    """A division: a student group scoped by department, semester, section."""
+
     id: str
     name: str
+    department: str = ""
+    semester: str = ""
+    section: str = ""
+
+    @property
+    def division(self) -> str:
+        """Scoped label like 'CSE-S3-A'; falls back to id for unscoped groups."""
+        if self.department or self.semester or self.section:
+            return f"{self.department}-{self.semester}-{self.section}"
+        return self.id
+
+    @property
+    def first_year(self) -> bool:
+        """True for first-year divisions (semesters S1 and S2)."""
+        return self.semester in {"S1", "S2"}
 
 
 @dataclass(frozen=True)
@@ -90,3 +127,29 @@ class Proposal:
     assigned_room: str | None = None
     warnings: list[str] = field(default_factory=list)
     status: str = STATUS_PENDING
+
+
+@dataclass
+class Exchange:
+    """A proposed swap of two scheduled teaching periods between faculty."""
+
+    id: str
+    proposer: str  # Faculty A
+    counterparty: str  # Faculty B
+    proposer_slot: tuple[str, int, str]  # (day, period, class_group)
+    counterparty_slot: tuple[str, int, str]
+    status: str = EXCHANGE_PROPOSED
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ProjectGroup:
+    """A student project group within a division, with a faculty supervisor."""
+
+    id: str
+    title: str
+    class_group: str  # division id
+    supervisor: str  # faculty id
+    day: str = ""
+    period: int = 0
+    room: str = ""
