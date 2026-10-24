@@ -14,7 +14,13 @@ import datetime as dt
 import pandas as pd
 import streamlit as st
 
-from campusly.data import SEMESTERS, day_name, load_seed_data, semester_parity
+from campusly.data import (
+    SEMESTERS,
+    day_name,
+    default_requirements,
+    load_seed_data,
+    semester_parity,
+)
 from campusly.export import to_csv
 from campusly.models import (
     DAYS,
@@ -26,6 +32,7 @@ from campusly.models import (
     STATUS_PENDING,
     STATUS_UNCOVERED,
     SUPERVISION_SUBJECT,
+    TT_DRAFT,
     Proposal,
 )
 from campusly.store import DuplicateAbsenceError, Store
@@ -896,8 +903,13 @@ def page_student_timetable(store: Store, date: dt.date, ctx: dict) -> None:
 def page_admin(store: Store, date: dt.date, ctx: dict) -> None:
     st.title("Administration")
     iso = date.isoformat()
-    tab_cal, tab_off, tab_dir = st.tabs(
-        ["Semester calendar", "Subject offerings & projects", "Departments & faculty"]
+    tab_cal, tab_off, tab_gen, tab_dir = st.tabs(
+        [
+            "Semester calendar",
+            "Subject offerings & projects",
+            "Generate timetable",
+            "Departments & faculty",
+        ]
     )
 
     with tab_cal:
@@ -1057,6 +1069,152 @@ def page_admin(store: Store, date: dt.date, ctx: dict) -> None:
             st.dataframe(
                 projects_df(store, store.projects), hide_index=True, width="stretch"
             )
+
+    with tab_gen:
+        st.subheader("Generate a new timetable")
+        st.caption(
+            "Builds a draft for a target academic year and semester. The "
+            "published timetable is untouched until you publish — and a "
+            "future semester's draft cannot go live early."
+        )
+        gen_depts = [
+            d
+            for d in sorted(store.data.departments)
+            if any(c.department == d for c in store.data.classes.values())
+        ]
+        c1, c2, c3, c4 = st.columns(4)
+        gen_year = int(
+            c1.number_input(
+                "Academic year",
+                min_value=2000,
+                max_value=2100,
+                value=store.academic_year + 1,
+                step=1,
+                key="gen-year",
+            )
+        )
+        gen_sem = c2.selectbox("Semester", SEMESTERS, key="gen-sem")
+        gen_dept = c3.selectbox(
+            "Department", gen_depts,
+            format_func=lambda d: dname(store, d), key="gen-dept",
+        )
+        gen_divs = divisions_of(store, gen_dept, gen_sem)
+        if not gen_divs:
+            st.warning(f"No {dname(store, gen_dept)} divisions in {gen_sem}.")
+        else:
+            gen_div = c4.selectbox("Division", gen_divs, key="gen-div")
+            window = store.semester_window_for(gen_year, gen_sem)
+            st.caption(
+                f"{gen_sem} of {gen_year} runs {window.start} – {window.end}."
+            )
+
+            st.subheader("Required weekly hours")
+            defaults = default_requirements(gen_dept)
+            subject_ids = sorted(store.data.subjects)
+            cols = st.columns(4)
+            requirements = {}
+            for i, sid in enumerate(subject_ids):
+                requirements[sid] = int(
+                    cols[i % 4].number_input(
+                        sname(store, sid),
+                        min_value=0,
+                        max_value=12,
+                        value=defaults.get(sid, 0),
+                        key=f"gen-h-{gen_dept}-{sid}",
+                    )
+                )
+            requirements = {s: h for s, h in requirements.items() if h > 0}
+
+            st.subheader("Faculty assignment (optional)")
+            teacher_opts = sorted(
+                store.data.teachers,
+                key=lambda t: f"{store.data.teachers[t].name} ({t})",
+            )
+            pins = {}
+            pcols = st.columns(4)
+            for i, sid in enumerate(sorted(requirements)):
+                choice = pcols[i % 4].selectbox(
+                    sname(store, sid),
+                    ["auto"] + teacher_opts,
+                    format_func=lambda t: (
+                        "auto"
+                        if t == "auto"
+                        else f"{tname(store, t)} ({t})"
+                    ),
+                    key=f"gen-a-{gen_dept}-{sid}",
+                )
+                if choice != "auto":
+                    pins[sid] = choice
+
+            if st.button("Generate draft", type="primary", key="gen-run"):
+                try:
+                    store.generate_draft(gen_div, gen_year, requirements, pins)
+                except (KeyError, ValueError) as e:
+                    st.error(str(e))
+                else:
+                    st.rerun()
+
+            draft = next(
+                (
+                    d
+                    for d in store.timetable_drafts(TT_DRAFT)
+                    if d.academic_year == gen_year and d.class_group == gen_div
+                ),
+                None,
+            )
+            if draft is not None:
+                st.subheader(f"Draft — {gen_div}, {gen_sem} {gen_year}")
+                cells = {
+                    (s.day, s.period): (
+                        f"{sname(store, s.subject)}\n"
+                        f"{tname(store, s.teacher)} · {s.room}"
+                    )
+                    for s in draft.slots
+                }
+                st.dataframe(
+                    week_grid(cells), hide_index=True, width="stretch"
+                )
+                if draft.violations:
+                    st.error(
+                        "Unsatisfied constraints — publish is blocked:\n- "
+                        + "\n- ".join(draft.violations)
+                    )
+                for w in draft.warnings:
+                    st.warning(w)
+                b1, b2 = st.columns(2)
+                if b1.button("Publish timetable", key="gen-publish"):
+                    try:
+                        store.publish_draft(draft.id, iso)
+                    except ValueError as e:
+                        st.error(str(e))
+                    else:
+                        st.toast(f"{gen_div} timetable published.")
+                        st.rerun()
+                if b2.button("Discard draft", key="gen-discard"):
+                    store.discard_draft(draft.id)
+                    st.rerun()
+
+            drafts = store.timetable_drafts()
+            if drafts:
+                st.subheader("Drafts")
+                st.dataframe(
+                    pd.DataFrame(
+                        {
+                            "Draft": [d.id for d in drafts],
+                            "Division": [d.class_group for d in drafts],
+                            "Semester": [
+                                store.data.classes[d.class_group].semester
+                                for d in drafts
+                            ],
+                            "Academic year": [d.academic_year for d in drafts],
+                            "Slots": [len(d.slots) for d in drafts],
+                            "Violations": [len(d.violations) for d in drafts],
+                            "Status": [d.status for d in drafts],
+                        }
+                    ),
+                    hide_index=True,
+                    width="stretch",
+                )
 
     with tab_dir:
         st.subheader("Departments")

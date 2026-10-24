@@ -38,12 +38,18 @@ EXCHANGE_REJECTED = "rejected"
 # Subject marker for project-supervision timetable slots.
 SUPERVISION_SUBJECT = "supervision"
 
+# Generated-timetable lifecycle: draft -> published | discarded.
+TT_DRAFT = "draft"
+TT_PUBLISHED = "published"
+TT_DISCARDED = "discarded"
+
 
 @dataclass(frozen=True)
 class Subject:
     id: str
     name: str
     department: str = ""
+    room_kind: str = ""  # e.g. "lab"/"gym"; "" means any teaching room
 
 
 @dataclass(frozen=True)
@@ -64,6 +70,7 @@ class Teacher:
 class Room:
     id: str
     name: str
+    kind: str = "classroom"
 
 
 @dataclass(frozen=True)
@@ -140,6 +147,26 @@ class Exchange:
     counterparty_slot: tuple[str, int, str]
     status: str = EXCHANGE_PROPOSED
     warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class GeneratedTimetable:
+    """A generated draft timetable for one division and academic year.
+
+    `violations` are unsatisfied mandatory constraints (unallocated hours,
+    clashes) that block publication; `warnings` are unmet preferences and
+    flags (non-consecutive labs, cross-department faculty) that do not.
+    """
+
+    id: str
+    academic_year: int
+    class_group: str
+    requirements: dict[str, int]
+    assignments: dict[str, str]
+    slots: list[TimetableSlot]
+    violations: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    status: str = TT_DRAFT
 
 
 @dataclass

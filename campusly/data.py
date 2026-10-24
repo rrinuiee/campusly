@@ -227,16 +227,11 @@ def _teachers() -> dict[str, Teacher]:
 
 
 def _rooms() -> dict[str, Room]:
-    ids = [f"R-{101 + i}" for i in range(96)] + [
-        "LAB-CS",
-        "LAB-ECE",
-        "LAB-EE",
-        "LAB-ME",
-        "LAB-CE",
-        "LAB-SCI",
-        "GYM",
-    ]
-    return {i: Room(i, i) for i in ids}
+    rooms = {f"R-{101 + i}": Room(f"R-{101 + i}", f"R-{101 + i}", "classroom") for i in range(96)}
+    for lab in ("LAB-CS", "LAB-ECE", "LAB-EE", "LAB-ME", "LAB-CE", "LAB-SCI"):
+        rooms[lab] = Room(lab, lab, "lab")
+    rooms["GYM"] = Room("GYM", "GYM", "gym")
+    return rooms
 
 
 # Section letters per department per semester.
@@ -277,6 +272,16 @@ def _week_mix(dept: str) -> list[str]:
         [_CORE_SUBJECT[dept]] * 8 + ["math"] * 5 + ["phy"] * 4
         + ["chem"] * 4 + ["eng"] * 3 + ["pe"] * 2 + [FREE_PERIOD] * 4
     )
+
+
+def default_requirements(department: str) -> dict[str, int]:
+    """Default weekly subject hours for a department's divisions.
+
+    Shared by the seed timetable and the generator's default curriculum, so
+    generated timetables start from the same subject mix as seeded ones.
+    """
+    mix = _week_mix(department)
+    return {s: mix.count(s) for s in dict.fromkeys(mix) if s != FREE_PERIOD}
 
 
 _HOME_ROOMS = {cid: f"R-{101 + i}" for i, cid in enumerate(_classes())}

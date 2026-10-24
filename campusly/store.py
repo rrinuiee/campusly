@@ -21,6 +21,7 @@ from .data import (
 )
 from .data import active_semesters as _active_semesters
 from .engine import allocate
+from .generator import generate
 from .models import (
     EXCHANGE_ACCEPTED,
     EXCHANGE_APPROVED,
@@ -32,8 +33,12 @@ from .models import (
     STATUS_PENDING,
     STATUS_UNCOVERED,
     SUPERVISION_SUBJECT,
+    TT_DISCARDED,
+    TT_DRAFT,
+    TT_PUBLISHED,
     Absence,
     Exchange,
+    GeneratedTimetable,
     ProjectGroup,
     Proposal,
     TimetableSlot,
@@ -51,6 +56,10 @@ class Store:
         self.proposals: list[Proposal] = []
         self.projects: list[ProjectGroup] = []
         self.exchanges: list[Exchange] = []
+        self.tt_drafts: list[GeneratedTimetable] = []
+        self.academic_year = (
+            academic_year if academic_year is not None else dt.date.today().year
+        )
         # Per-slot teacher overrides written by approved exchanges; the
         # base timetable stays immutable, same as for substitutions.
         self.exchange_overrides: dict[tuple[str, int, str], str] = {}
@@ -58,9 +67,7 @@ class Store:
         self._pg_seq = itertools.count(1)
         self._x_seq = itertools.count(1)
         # In-memory only: a fresh Store always starts from default windows.
-        self.semester_windows = default_semester_windows(
-            academic_year if academic_year is not None else dt.date.today().year
-        )
+        self.semester_windows = default_semester_windows(self.academic_year)
 
     # ----- academic calendar ---------------------------------------------------
 
@@ -621,3 +628,170 @@ class Store:
 
     def workload(self, date: str) -> dict[str, int]:
         return self._weekly_workload(date)
+
+    # ----- timetable generation ------------------------------------------------
+
+    def semester_window_for(
+        self, academic_year: int, semester: str
+    ) -> SemesterWindow:
+        """The semester window for a draft's year.
+
+        Admin overrides apply only to the store's own academic year; other
+        years use default windows.
+        """
+        if semester not in SEMESTERS:
+            raise KeyError(f"unknown semester {semester}")
+        if academic_year == self.academic_year:
+            return self.semester_windows[semester]
+        return default_semester_windows(academic_year)[semester]
+
+    def generate_draft(
+        self,
+        class_group: str,
+        academic_year: int,
+        requirements: dict[str, int],
+        assignments: dict[str, str] | None = None,
+    ) -> GeneratedTimetable:
+        """Generate (or regenerate) a draft timetable for a division.
+
+        Never touches the published timetable. An existing draft for the
+        same (academic_year, division) is replaced.
+        """
+        if class_group not in self.data.classes:
+            raise KeyError(f"unknown division {class_group}")
+        for sid, hours in requirements.items():
+            if sid not in self.data.subjects:
+                raise KeyError(f"unknown subject {sid}")
+            if not isinstance(hours, int) or hours < 0:
+                raise ValueError(f"invalid weekly hours for {sid}")
+        assignments = assignments or {}
+        for tid in assignments.values():
+            if tid not in self.data.teachers:
+                raise KeyError(f"unknown teacher {tid}")
+        slots, violations, warnings = generate(
+            self.data, class_group, requirements, assignments
+        )
+        draft = GeneratedTimetable(
+            id=f"TT-{academic_year}-{class_group}",
+            academic_year=academic_year,
+            class_group=class_group,
+            requirements=dict(requirements),
+            assignments=dict(assignments),
+            slots=slots,
+            violations=violations,
+            warnings=warnings,
+        )
+        self.tt_drafts = [d for d in self.tt_drafts if d.id != draft.id]
+        self.tt_drafts.append(draft)
+        return draft
+
+    def timetable_drafts(self, status: str | None = None) -> list[GeneratedTimetable]:
+        return [d for d in self.tt_drafts if status is None or d.status == status]
+
+    def _draft(self, draft_id: str) -> GeneratedTimetable:
+        for d in self.tt_drafts:
+            if d.id == draft_id:
+                return d
+        raise KeyError(f"unknown draft {draft_id}")
+
+    def _draft_conflicts(self, draft: GeneratedTimetable) -> list[str]:
+        """Faculty/room/division clashes of draft slots against live slots.
+
+        The division's own non-supervision slots are excluded — publishing
+        replaces them — but its supervision slots stay occupied.
+        """
+        cg = draft.class_group
+        parity = semester_parity(self.data.classes[cg].semester)
+        replaceable = {
+            s.key
+            for s in self.data.timetable
+            if s.class_group == cg and s.subject != SUPERVISION_SUBJECT
+        }
+        conflicts: list[str] = []
+        for s in draft.slots:
+            current = self.data.slot_at(s.day, s.period, cg)
+            if current is not None and current.key not in replaceable:
+                conflicts.append(
+                    f"{s.day} P{s.period}: conflicts with a supervision slot"
+                )
+                continue
+            for t in self.data.timetable:
+                if (
+                    t.day != s.day
+                    or t.period != s.period
+                    or t.key in replaceable
+                ):
+                    continue
+                sem = self.data.classes[t.class_group].semester
+                if sem and sem not in parity:
+                    continue
+                if self.effective_teacher(t) == s.teacher:
+                    conflicts.append(
+                        f"{s.day} P{s.period}: faculty {s.teacher} already "
+                        f"teaches {t.class_group}"
+                    )
+                    break
+                if t.room == s.room:
+                    conflicts.append(
+                        f"{s.day} P{s.period}: room {s.room} already used "
+                        f"by {t.class_group}"
+                    )
+                    break
+        return conflicts
+
+    def publish_draft(self, draft_id: str, on: str) -> None:
+        """Publish a draft: replace the division's non-supervision slots.
+
+        Refuses (ValueError, nothing changed) when the draft's semester
+        window is not in session on `on`, blocking violations exist, open
+        proposals/exchanges or supervision conflicts would be broken, or
+        the draft now conflicts with the live timetable.
+        """
+        draft = self._draft(draft_id)
+        if draft.status != TT_DRAFT:
+            raise ValueError(f"draft {draft_id} is not awaiting publication")
+        cg = draft.class_group
+        semester = self.data.classes[cg].semester
+        window = self.semester_window_for(draft.academic_year, semester)
+        d = dt.date.fromisoformat(on)
+        if not (window.start <= d <= window.end):
+            raise ValueError(
+                f"{semester} of academic year {draft.academic_year} runs "
+                f"{window.start} to {window.end}; it is not in session on "
+                f"{on} and cannot be published early"
+            )
+        blockers = [f"unresolved violation: {v}" for v in draft.violations]
+        for p in self.proposals:
+            if p.class_group == cg and p.status in (STATUS_PENDING, STATUS_APPROVED):
+                blockers.append(f"open substitution proposal {p.id}")
+        for x in self.exchanges:
+            if x.status in (EXCHANGE_PROPOSED, EXCHANGE_ACCEPTED) and cg in (
+                x.proposer_slot[2],
+                x.counterparty_slot[2],
+            ):
+                blockers.append(f"open period exchange {x.id}")
+        blockers += self._draft_conflicts(draft)
+        if blockers:
+            raise ValueError(
+                "publication blocked: " + "; ".join(sorted(set(blockers)))
+            )
+        remaining = [
+            s
+            for s in self.data.timetable
+            if not (s.class_group == cg and s.subject != SUPERVISION_SUBJECT)
+        ]
+        removed_keys = {
+            s.key
+            for s in self.data.timetable
+            if s.class_group == cg and s.subject != SUPERVISION_SUBJECT
+        }
+        self.data.timetable[:] = remaining + list(draft.slots)
+        for key in removed_keys:
+            self.exchange_overrides.pop(key, None)
+        draft.status = TT_PUBLISHED
+
+    def discard_draft(self, draft_id: str) -> None:
+        """Drop a draft without touching anything else."""
+        draft = self._draft(draft_id)
+        draft.status = TT_DISCARDED
+        self.tt_drafts = [d for d in self.tt_drafts if d.id != draft_id]
