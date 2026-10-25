@@ -583,6 +583,56 @@ def test_exchange_overrides_affect_uncovered_and_busy():
     assert p.substitute_teacher == "A1"
 
 
+def test_exchange_duplicate_slot_refused():
+    store = Store(_exchange_data())
+    store.propose_exchange("A1", SLOT_A, SLOT_B)
+    # A second proposal involving SLOT_A (or SLOT_B) is stale/duplicate.
+    with pytest.raises(ValueError, match="open exchange"):
+        store.propose_exchange("X1", ("Monday", 1, "CSE-S2-B"), SLOT_B)
+    assert len(store.exchanges) == 1
+
+
+def test_exchange_unqualified_swap_refused():
+    store = Store(_exchange_data())
+    # A1 (cs) would take over B1's ma slot; neither is qualified crosswise.
+    with pytest.raises(ValueError, match="not qualified"):
+        store.propose_exchange("A1", SLOT_A, ("Tuesday", 2, "CSE-S2-A"))
+    assert store.exchanges == []
+
+
+def test_exchange_supervision_slot_refused():
+    store = Store(_exchange_data())
+    # B1 supervises a project group — its supervision slot is off-limits.
+    store.add_project_group("P", "ECE-S2-A", "B1", "Wednesday", 4, "R2")
+    sup = ("Wednesday", 4, "ECE-S2-A")
+    with pytest.raises(ValueError, match="supervision"):
+        store.propose_exchange("B1", sup, SLOT_B)
+    with pytest.raises(ValueError, match="supervision"):
+        store.propose_exchange("A1", SLOT_A, sup)
+
+
+def test_exchange_options_only_eligible():
+    store = Store(_exchange_data())
+    eligible, blocked = store.exchange_options("A1", SLOT_A)
+    # A1 is only qualified for cs, so only cs slots qualify: A2's Mon-P3
+    # slot, and X1's Mon-P1 slot (swapping same-time slots is conflict-free).
+    assert {s.key for s in eligible} == {SLOT_B, ("Monday", 1, "CSE-S2-B")}
+    assert ("Tuesday", 2, "CSE-S2-A") in blocked   # unqualified both ways
+    assert ("Monday", 1, "ECE-S2-A") in blocked    # B2 busy + unqualified
+
+
+def test_exchange_approval_on_removed_slot_fails_cleanly():
+    store = Store(_exchange_data())
+    x = store.propose_exchange("A1", SLOT_A, SLOT_B)
+    store.respond_exchange(x.id, accept=True)
+    store.data.timetable[:] = [
+        s for s in store.data.timetable if s.key != SLOT_A
+    ]
+    with pytest.raises(ValueError, match="can no longer be applied"):
+        store.approve_exchange(x.id)
+    assert x.status == EXCHANGE_ACCEPTED
+
+
 def test_reject_proposal_scoped_to_department():
     store = Store(_exchange_data())
     store.report_absence("X1", MONDAY)

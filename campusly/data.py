@@ -280,6 +280,8 @@ def default_requirements(department: str) -> dict[str, int]:
     Shared by the seed timetable and the generator's default curriculum, so
     generated timetables start from the same subject mix as seeded ones.
     """
+    if department not in _CORE_SUBJECT:
+        raise KeyError(f"no default curriculum for department {department!r}")
     mix = _week_mix(department)
     return {s: mix.count(s) for s in dict.fromkeys(mix) if s != FREE_PERIOD}
 

@@ -25,6 +25,7 @@ from campusly.export import to_csv
 from campusly.models import (
     DAYS,
     EXCHANGE_ACCEPTED,
+    EXCHANGE_APPROVED,
     EXCHANGE_PROPOSED,
     PERIOD_TIMES,
     PERIODS,
@@ -271,6 +272,29 @@ def exchange_label(store: Store, x) -> str:
         f"{x.id}: {tname(store, x.proposer)} offers {slot_label(store, sa)} "
         f"⇄ {tname(store, x.counterparty)}'s {slot_label(store, sb)}"
     )
+
+
+def exchange_pair(store: Store, x) -> tuple[str, str]:
+    """('proposer slot', 'counterparty slot') labels, resilient to removed slots."""
+    sa = store.data.slot_at(*x.proposer_slot)
+    sb = store.data.slot_at(*x.counterparty_slot)
+    a = slot_label(store, sa) if sa else f"{x.proposer_slot} — slot removed"
+    b = slot_label(store, sb) if sb else f"{x.counterparty_slot} — slot removed"
+    return a, b
+
+
+def exchange_next_action(store: Store, x, viewer: str | None = None) -> str:
+    """Who must act next on this exchange, phrased for `viewer`."""
+    if x.status == EXCHANGE_PROPOSED:
+        if viewer == x.counterparty:
+            return "Awaiting your response"
+        return f"Waiting for {tname(store, x.counterparty)} to respond"
+    if x.status == EXCHANGE_ACCEPTED:
+        dept = store.data.teachers[x.proposer].department
+        return f"Awaiting approval by the {dname(store, dept)} coordinator"
+    if x.status == EXCHANGE_APPROVED:
+        return "Applied to both timetables"
+    return "Closed — no timetable change"
 
 
 def projects_df(store: Store, projects) -> pd.DataFrame:
@@ -621,30 +645,33 @@ def page_exchanges_faculty(store: Store, date: dt.date, ctx: dict) -> None:
     own = st.selectbox(
         "Your slot", my_slots, format_func=lambda s: slot_label(store, s)
     )
-    own_parity = semester_parity(store.data.classes[own.class_group].semester)
-    counterparty_slots = sorted(
-        (
-            s
-            for s in store.data.timetable
-            if store.effective_teacher(s) != me
-            and s.key not in store.exchange_overrides
-            and store.data.classes[s.class_group].semester in own_parity
-        ),
-        key=lambda s: (DAYS.index(s.day), s.period, s.class_group),
-    )
-    other = st.selectbox(
-        "Slot to swap for",
-        counterparty_slots,
-        format_func=lambda s: slot_label(store, s),
-    )
-    if st.button("Propose exchange", type="primary"):
-        try:
-            x = store.propose_exchange(me, own.key, other.key)
-        except (KeyError, ValueError) as e:
-            st.error(f"Proposal refused: {e}")
-        else:
-            st.toast(f"{x.id} sent to {tname(store, x.counterparty)}.")
-            st.rerun()
+    eligible, blocked = store.exchange_options(me, own.key)
+    if not eligible:
+        st.info(
+            "No eligible slots to swap for this period "
+            f"({len(blocked)} excluded by constraints)."
+        )
+    else:
+        other = st.selectbox(
+            "Slot to swap for",
+            sorted(
+                eligible, key=lambda s: (DAYS.index(s.day), s.period, s.class_group)
+            ),
+            format_func=lambda s: slot_label(store, s),
+        )
+        st.caption(
+            f"{len(eligible)} eligible option(s) — only feasible swaps are "
+            f"shown ({len(blocked)} excluded: clashes, unqualified faculty, "
+            "supervision, or slots already in an exchange)."
+        )
+        if st.button("Propose exchange", type="primary"):
+            try:
+                x = store.propose_exchange(me, own.key, other.key)
+            except (KeyError, ValueError) as e:
+                st.error(f"Proposal refused: {e}")
+            else:
+                st.toast(f"{x.id} sent to {tname(store, x.counterparty)}.")
+                st.rerun()
 
     mine = store.exchanges_for(me)
     incoming = [x for x in mine if x.counterparty == me and x.status == EXCHANGE_PROPOSED]
@@ -655,13 +682,17 @@ def page_exchanges_faculty(store: Store, date: dt.date, ctx: dict) -> None:
         st.subheader(f"Requests for you ({len(incoming)})")
         for x in incoming:
             with st.container(border=True):
-                st.markdown(exchange_label(store, x))
+                offer, request = exchange_pair(store, x)
                 c1, c2 = st.columns(2)
-                if c1.button("Accept", key=f"x-acc-{x.id}", type="primary"):
+                c1.markdown(f"**{tname(store, x.proposer)} offers**  \n{offer}")
+                c2.markdown(f"**In exchange for your**  \n{request}")
+                st.caption(f"{x.id} · {exchange_next_action(store, x, me)}")
+                b1, b2 = st.columns(2)
+                if b1.button("Accept", key=f"x-acc-{x.id}", type="primary"):
                     store.respond_exchange(x.id, accept=True, actor=me)
                     st.toast("Accepted — sent to the department coordinator.")
                     st.rerun()
-                if c2.button("Decline", key=f"x-dec-{x.id}"):
+                if b2.button("Decline", key=f"x-dec-{x.id}"):
                     store.respond_exchange(x.id, accept=False, actor=me)
                     st.toast("Declined.")
                     st.rerun()
@@ -670,7 +701,15 @@ def page_exchanges_faculty(store: Store, date: dt.date, ctx: dict) -> None:
         st.subheader("Your proposals")
         for x in sorted(outgoing, key=lambda x: x.id):
             with st.container(border=True):
-                st.markdown(exchange_label(store, x) + f" — **{x.status}**")
+                offer, request = exchange_pair(store, x)
+                c1, c2 = st.columns(2)
+                c1.markdown(f"**You offer**  \n{offer}")
+                c2.markdown(
+                    f"**{tname(store, x.counterparty)} offers**  \n{request}"
+                )
+                st.caption(
+                    f"{x.id} · {x.status} — {exchange_next_action(store, x, me)}"
+                )
                 if x.warnings:
                     st.warning("; ".join(x.warnings))
                 if x.status == EXCHANGE_PROPOSED:
@@ -682,7 +721,10 @@ def page_exchanges_faculty(store: Store, date: dt.date, ctx: dict) -> None:
     if answered:
         st.subheader("Requests you answered")
         for x in answered:
-            st.caption(exchange_label(store, x) + f" — {x.status}")
+            st.caption(
+                exchange_label(store, x)
+                + f" — {x.status} ({exchange_next_action(store, x, me)})"
+            )
 
     if not incoming and not outgoing and not answered:
         st.info("No exchanges yet — propose one above.")
@@ -702,11 +744,17 @@ def page_exchanges_coordinator(store: Store, date: dt.date, ctx: dict) -> None:
         st.subheader(f"Awaiting your decision ({len(pending)})")
         for x in pending:
             with st.container(border=True):
-                st.markdown(exchange_label(store, x))
+                offer, request = exchange_pair(store, x)
+                c1, c2 = st.columns(2)
+                c1.markdown(f"**{tname(store, x.proposer)} offers**  \n{offer}")
+                c2.markdown(
+                    f"**{tname(store, x.counterparty)} offers**  \n{request}"
+                )
+                st.caption(f"{x.id} · {exchange_next_action(store, x)}")
                 if x.warnings:
                     st.warning("; ".join(x.warnings))
-                c1, c2 = st.columns(2)
-                if c1.button("Approve swap", key=f"x-ok-{x.id}", type="primary"):
+                b1, b2 = st.columns(2)
+                if b1.button("Approve swap", key=f"x-ok-{x.id}", type="primary"):
                     try:
                         store.approve_exchange(x.id, department=dept)
                     except ValueError as e:
@@ -714,7 +762,7 @@ def page_exchanges_coordinator(store: Store, date: dt.date, ctx: dict) -> None:
                     else:
                         st.toast("Approved — both timetables updated.")
                         st.rerun()
-                if c2.button("Reject", key=f"x-no-{x.id}"):
+                if b2.button("Reject", key=f"x-no-{x.id}"):
                     store.reject_exchange(x.id, department=dept)
                     st.toast("Rejected — timetables unchanged.")
                     st.rerun()

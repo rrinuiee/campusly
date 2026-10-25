@@ -366,6 +366,72 @@ class Store:
                 )
         return out
 
+    def _exchange_reasons(
+        self, proposer: str, sa: TimetableSlot, sb: TimetableSlot
+    ) -> list[str]:
+        """Every reason the swap of `sa` (proposer's) and `sb` cannot proceed.
+
+        Covers participant double-booking, self-swaps, supervision slots,
+        slots already in an open exchange, and faculty not qualified for
+        the subject they would take over.
+        """
+        counterparty = self.effective_teacher(sb)
+        reasons = self._swap_conflicts(proposer, sb, sa) + self._swap_conflicts(
+            counterparty, sa, sb
+        )
+        if counterparty == proposer:
+            reasons.append("cannot exchange slots with yourself")
+        if sa.subject == SUPERVISION_SUBJECT or sb.subject == SUPERVISION_SUBJECT:
+            reasons.append("supervision meetings cannot be exchanged")
+        for x in self.exchanges:
+            if x.status not in (EXCHANGE_PROPOSED, EXCHANGE_ACCEPTED):
+                continue
+            if sa.key in (x.proposer_slot, x.counterparty_slot) or sb.key in (
+                x.proposer_slot,
+                x.counterparty_slot,
+            ):
+                reasons.append(f"a slot is already part of open exchange {x.id}")
+                break
+        for mover, target in ((proposer, sb), (counterparty, sa)):
+            if (
+                target.subject != SUPERVISION_SUBJECT
+                and target.subject not in self.data.teachers[mover].subjects
+            ):
+                reasons.append(
+                    f"{self.data.teachers[mover].name} is not qualified to "
+                    f"teach {self.data.subjects[target.subject].name}"
+                )
+        return reasons
+
+    def exchange_options(
+        self, proposer: str, proposer_slot: tuple[str, int, str]
+    ) -> tuple[list[TimetableSlot], dict[tuple[str, int, str], list[str]]]:
+        """Slots eligible to swap for `proposer_slot`.
+
+        Returns (eligible slots, {excluded slot key: [reasons]}) within the
+        offered slot's semester parity, so the UI can offer only feasible
+        counterparty slots instead of failing at submission.
+        """
+        sa = self._slot(proposer_slot, "proposer")
+        parity = semester_parity(self.data.classes[sa.class_group].semester)
+        eligible: list[TimetableSlot] = []
+        blocked: dict[tuple[str, int, str], list[str]] = {}
+        for s in self.data.timetable:
+            sem = self.data.classes[s.class_group].semester
+            if sem and sem not in parity:
+                continue
+            if (
+                self.effective_teacher(s) == proposer
+                or s.key in self.exchange_overrides
+            ):
+                continue
+            reasons = self._exchange_reasons(proposer, sa, s)
+            if reasons:
+                blocked[s.key] = reasons
+            else:
+                eligible.append(s)
+        return eligible, blocked
+
     def propose_exchange(
         self,
         proposer: str,
@@ -374,8 +440,9 @@ class Store:
     ) -> Exchange:
         """Propose swapping `proposer`'s slot for another faculty member's.
 
-        The swap is simulated up front: a proposal that would double-book
-        either participant is rejected and nothing is recorded.
+        The swap is validated up front: double-booking, unqualified
+        takeovers, supervision slots, and slots already in an open exchange
+        are rejected and nothing is recorded.
         """
         if proposer not in self.data.teachers:
             raise KeyError(f"unknown teacher {proposer}")
@@ -386,13 +453,14 @@ class Store:
         if self.effective_teacher(sa) != proposer:
             raise ValueError("the offered slot is not taught by the proposer")
         counterparty = self.effective_teacher(sb)
-        if counterparty == proposer:
-            raise ValueError("cannot exchange slots with yourself")
-        conflicts = self._swap_conflicts(proposer, sb, sa) + self._swap_conflicts(
-            counterparty, sa, sb
-        )
+        reasons = self._exchange_reasons(proposer, sa, sb)
+        conflicts = [
+            r for r in reasons if "already teaches" in r or "substitute" in r
+        ]
         if conflicts:
             raise ValueError("exchange would double-book: " + "; ".join(conflicts))
+        if reasons:
+            raise ValueError("exchange cannot proceed: " + "; ".join(reasons))
         ex = Exchange(
             id=f"X-{next(self._x_seq):03d}",
             proposer=proposer,
@@ -433,8 +501,13 @@ class Store:
         self._require_department(
             department, self.data.teachers[x.proposer].department
         )
-        sa = self._slot(x.proposer_slot, "proposer")
-        sb = self._slot(x.counterparty_slot, "counterparty")
+        try:
+            sa = self._slot(x.proposer_slot, "proposer")
+            sb = self._slot(x.counterparty_slot, "counterparty")
+        except KeyError as e:
+            raise ValueError(
+                f"exchange {exchange_id} can no longer be applied: {e}"
+            ) from e
         conflicts = []
         if self.effective_teacher(sa) != x.proposer:
             conflicts.append("proposer no longer teaches the offered slot")

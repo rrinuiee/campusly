@@ -331,8 +331,11 @@ def test_publish_blocked_by_open_exchange():
     store.data.timetable.append(
         TimetableSlot("Tuesday", 1, "CSE-S2-A", "cs", "A1", "R1")
     )
+    store.data.timetable.append(
+        TimetableSlot("Wednesday", 2, "CSE-S2-B", "cs", "A2", "R2")
+    )
     x = store.propose_exchange(
-        "A1", ("Tuesday", 1, "CSE-S2-A"), ("Monday", 2, "CSE-S2-B")
+        "A1", ("Tuesday", 1, "CSE-S2-A"), ("Wednesday", 2, "CSE-S2-B")
     )
     draft = store.generate_draft("CSE-S2-A", 2026, {"cs": 4})
     with pytest.raises(ValueError, match="exchange"):
@@ -366,6 +369,51 @@ def test_semester_window_for_year_scoping():
     assert store.semester_window_for(2027, "S2").start == dt.date(2027, 7, 1)
     with pytest.raises(KeyError):
         store.semester_window_for(2027, "S9")
+
+
+def test_every_division_generates_exact_hours_without_clashes():
+    """Curriculum sweep: every department × semester × section division.
+
+    Generated drafts must allocate exactly the configured hours and never
+    double-book division, faculty, or room within the semester parity.
+    """
+    from campusly.data import load_seed_data
+
+    data = load_seed_data()
+    for cid, c in sorted(data.classes.items()):
+        req = default_requirements(c.department)
+        slots, violations, _ = generate(data, cid, req)
+        assert violations == [], (cid, violations)
+        counts = {}
+        for s in slots:
+            counts[s.subject] = counts.get(s.subject, 0) + 1
+        assert counts == req, cid
+        parity = (
+            {"S1", "S3", "S5", "S7"}
+            if c.semester in {"S1", "S3", "S5", "S7"}
+            else {"S2", "S4", "S6", "S8"}
+        )
+        replaceable = {
+            s.key
+            for s in data.timetable
+            if s.class_group == cid and s.subject != SUPERVISION_SUBJECT
+        }
+        seen = set()
+        for s in slots:
+            assert (s.day, s.period) not in seen
+            seen.add((s.day, s.period))
+            for t in data.timetable:
+                if t.key in replaceable or (t.day, t.period) != (s.day, s.period):
+                    continue
+                if data.classes[t.class_group].semester not in parity:
+                    continue
+                assert t.teacher != s.teacher, (cid, s, t)
+                assert t.room != s.room, (cid, s, t)
+
+
+def test_default_requirements_rejects_service_department():
+    with pytest.raises(KeyError, match="no default curriculum"):
+        default_requirements("bs")
 
 
 def test_generation_respects_parity_isolation():
